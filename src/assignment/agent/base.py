@@ -14,6 +14,7 @@ import os
 from pathlib import Path
 from typing import Any
 
+import yaml
 from dotenv import load_dotenv
 from openai import OpenAI
 
@@ -62,6 +63,39 @@ def rough_message_tokens(messages: list[dict[str, Any]]) -> int:
 
     serialized = json.dumps(messages, ensure_ascii=False, separators=(",", ":"))
     return max(1, math.ceil(len(serialized) / 4))
+
+
+def parse_yaml_frontmatter(text: str, source: str | Path) -> dict[str, Any]:
+    """Parse the YAML mapping between the leading `---` markers of a skill file.
+
+    Args:
+        text: The whole file, as read from disk.
+        source: Where it came from, named in any error raised.
+
+    Raises:
+        ValueError: If the markers are missing or unterminated, or the block
+            between them is not valid YAML mapping syntax.
+    """
+
+    lines = text.splitlines()
+    if not lines or lines[0].strip() != "---":
+        raise ValueError(f"{source} does not start with a `---` frontmatter block")
+
+    closing = None
+    for index in range(1, len(lines)):
+        if lines[index].strip() == "---":
+            closing = index
+            break
+    if closing is None:
+        raise ValueError(f"{source} has an unterminated `---` frontmatter block")
+
+    try:
+        parsed = yaml.safe_load("\n".join(lines[1:closing]))
+    except yaml.YAMLError as exc:
+        raise ValueError(f"{source} has malformed YAML frontmatter: {exc}") from exc
+    if not isinstance(parsed, dict):
+        raise ValueError(f"{source} frontmatter is not a YAML mapping")
+    return parsed
 
 
 class Agent:
@@ -168,7 +202,36 @@ class Agent:
         # ``content`` of the skill file for ``invoke_skill``. Reject duplicate
         # names and malformed or missing frontmatter with a clear
         # ``ValueError``.
-        raise NotImplementedError
+        if not skills_path.is_dir():
+            raise ValueError(f"skills_path is not a directory: {skills_path}")
+
+        skills: dict[str, dict[str, str]] = {}
+        for directory in sorted(skills_path.iterdir()):
+            if not directory.is_dir():
+                continue
+
+            skill_file = directory / "SKILL.md"
+            if not skill_file.is_file():
+                raise ValueError(f"Skill directory {directory.name} has no SKILL.md")
+
+            content = skill_file.read_text(encoding="utf-8")
+            frontmatter = parse_yaml_frontmatter(content, skill_file)
+            name = frontmatter.get("name")
+            description = frontmatter.get("description")
+            if not isinstance(name, str) or not name:
+                raise ValueError(f"{skill_file} has no `name` in its frontmatter")
+            if not isinstance(description, str) or not description:
+                raise ValueError(f"{skill_file} has no `description` in its frontmatter")
+            if name in skills:
+                raise ValueError(f"Duplicate skill name `{name}` in {skill_file}")
+
+            # The catalog carries only the frontmatter, so the skill's body stays
+            # out of the prompt until the agent calls `invoke_skill` for it.
+            skills[name] = {
+                "metadata": f"name: {name}\ndescription: {description}",
+                "content": content,
+            }
+        return skills
 
     def query_language_model(self) -> dict[str, Any]:
         """Send one tool-enabled Chat Completions request and normalize it."""

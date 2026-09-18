@@ -11,7 +11,7 @@ from assignment.agent.base import (
     Agent,
     format_tool_output,
 )
-from assignment.agent.tools import EXECUTE_TOOL, SEND_MESSAGE_TOOL
+from assignment.agent.tools import EXECUTE_TOOL, INVOKE_SKILL_TOOL, SEND_MESSAGE_TOOL
 from assignment.env import Environment
 
 
@@ -54,9 +54,6 @@ class CodeAgent(Agent):
         self.task = task
         self.submitted_patch = ""
 
-        # TODO(1.4): If any skills are available to the agent, make their
-        # descriptions/metadata available to the agent in the prompt.
-
         system_information = json.dumps(
             {
                 "machine": self.env.machine,
@@ -86,10 +83,21 @@ class CodeAgent(Agent):
             "Fix the following issue in the repository at /testbed.\n\n" + self.task
         )
 
+        # Progressive disclosure: the catalog carries each skill's name and
+        # description only. A skill's body arrives when the agent invokes it, so
+        # an agent with no skills is never told how to submit.
+        if self.skills:
+            catalog = "\n".join(skill["metadata"] for skill in self.skills.values())
+            self.system_prompt += (
+                "\n\nReusable skills are available. Call `invoke_skill` with a "
+                "skill's name to load its instructions, and follow them in place "
+                f"of your default approach.\n\n<skills>\n{catalog}\n</skills>\n"
+            )
+
     def execute_tool_calls(
         self, tool_calls: list[dict[str, Any]]
     ) -> list[dict[str, str]]:
-        """Execute ``execute`` and ``send_message`` calls in the code sandbox."""
+        """Execute the calls this agent recognizes and observe each one."""
 
         # TODO(Part 1.3): Parse each call, execute recognized tools, and return
         # one message per call (there may be multiple tool calls in one agent
@@ -151,11 +159,30 @@ class CodeAgent(Agent):
                 self.submitted_patch = summary
                 self.finished = True
                 content = f"Message submitted:\n{summary}"
+            elif name == INVOKE_SKILL_TOOL["function"]["name"]:
+                skill_name = parsed.get("name")
+                if not isinstance(skill_name, str):
+                    observations.append(
+                        _tool_message(
+                            call_id, "Error: `invoke_skill` requires a `name`."
+                        )
+                    )
+                    continue
+                skill = self.skills.get(skill_name)
+                if skill is None:
+                    available = ", ".join(sorted(self.skills)) or "none"
+                    observations.append(
+                        _tool_message(
+                            call_id,
+                            f"Error: no skill named `{skill_name}`. "
+                            f"Available skills: {available}.",
+                        )
+                    )
+                    continue
+                content = skill["content"]
             else:
-                content = (
-                    f"Error: unknown tool `{name}`. "
-                    "Available tools: execute, send_message."
-                )
+                available = ", ".join(tool["function"]["name"] for tool in self.tools)
+                content = f"Error: unknown tool `{name}`. Available tools: {available}."
 
             observations.append(_tool_message(call_id, content))
 
