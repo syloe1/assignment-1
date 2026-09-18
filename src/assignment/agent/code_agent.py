@@ -9,9 +9,17 @@ from assignment.agent.base import (
     DEFAULT_COMPACTION_KEEP_RECENT_STEPS,
     DEFAULT_COMPACTION_MAX_TOKENS,
     Agent,
+    format_tool_output,
 )
 from assignment.agent.tools import EXECUTE_TOOL, SEND_MESSAGE_TOOL
 from assignment.env import Environment
+
+
+def _tool_message(tool_call_id: str, content: str) -> dict[str, str]:
+    """One observation, linked to the call it answers."""
+
+    return {"role": "tool", "tool_call_id": tool_call_id, "content": content}
+
 
 class CodeAgent(Agent):
     """An agent that fixes a software issue and submits a git patch."""
@@ -40,11 +48,11 @@ class CodeAgent(Agent):
             compaction_keep_recent_steps=compaction_keep_recent_steps,
             compaction_max_tokens=compaction_max_tokens,
         )
+        self.tools.append(EXECUTE_TOOL)
+        self.tools.append(SEND_MESSAGE_TOOL)
+
         self.task = task
         self.submitted_patch = ""
-
-        # TODO(Part 1.3): Make the `execute` and `send_message` tools available
-        # to the agent.
 
         # TODO(1.4): If any skills are available to the agent, make their
         # descriptions/metadata available to the agent in the prompt.
@@ -78,7 +86,6 @@ class CodeAgent(Agent):
             "Fix the following issue in the repository at /testbed.\n\n" + self.task
         )
 
-    # make the execute and send_message tools available to the agent
     def execute_tool_calls(
         self, tool_calls: list[dict[str, Any]]
     ) -> list[dict[str, str]]:
@@ -88,4 +95,68 @@ class CodeAgent(Agent):
         # one message per call (there may be multiple tool calls in one agent
         # response!). Malformed JSON and unknown tools must become recoverable
         # observations relayed to the agent instead of exceptions.
-        raise NotImplementedError
+        observations: list[dict[str, str]] = []
+
+        for call in tool_calls:
+            call_id = (
+                call.get("id", "unknown_id") if isinstance(call, dict) else "unknown_id"
+            )
+
+            # Only parsing is wrapped. A call we cannot read is the model's
+            # mistake, so it comes back as an observation to correct. A sandbox
+            # that has died is terminal instead, so `Environment.execute` is
+            # called outside this `try` and its RuntimeError propagates rather
+            # than being relayed as though the model had written bad arguments.
+            try:
+                function = call["function"]
+                name = function["name"]
+                arguments = function.get("arguments")
+                if not isinstance(arguments, str):
+                    raise ValueError("tool arguments must be a JSON string")
+                parsed = json.loads(arguments)
+                if not isinstance(parsed, dict):
+                    raise ValueError("tool arguments must decode to a JSON object")
+            except Exception as exc:
+                observations.append(
+                    _tool_message(
+                        call_id, f"Error: could not read this call's arguments: {exc}"
+                    )
+                )
+                continue
+
+            if name == EXECUTE_TOOL["function"]["name"]:
+                command = parsed.get("command")
+                if command is None:
+                    observations.append(
+                        _tool_message(call_id, "Error: `execute` requires a `command`.")
+                    )
+                    continue
+                result = self.env.execute(
+                    command=command,
+                    shell=parsed.get("shell"),
+                    cwd=parsed.get("cwd"),
+                    timeout=parsed.get("timeout"),
+                    env=parsed.get("env"),
+                )
+                content = format_tool_output(result)
+            elif name == SEND_MESSAGE_TOOL["function"]["name"]:
+                summary = parsed.get("summary")
+                if not isinstance(summary, str):
+                    observations.append(
+                        _tool_message(
+                            call_id, "Error: `send_message` requires a `summary`."
+                        )
+                    )
+                    continue
+                self.submitted_patch = summary
+                self.finished = True
+                content = f"Message submitted:\n{summary}"
+            else:
+                content = (
+                    f"Error: unknown tool `{name}`. "
+                    "Available tools: execute, send_message."
+                )
+
+            observations.append(_tool_message(call_id, content))
+
+        return observations
