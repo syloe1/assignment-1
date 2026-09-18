@@ -36,17 +36,6 @@ SANDBOX_FILES = (
     Path(__file__).with_name("sandbox_python.py"),
 )
 
-def _with_assignment_files(image):
-    """Copy the files the sandbox runs into /opt/assignment."""
-
-    for source in SANDBOX_FILES:
-        image = image.add_local_file(
-            str(source),
-            f"/opt/assignment/{source.name}",
-            copy=True,  # SWE-ReX adds its runtime build layer afterwards.
-        )
-    return image
-
 class ChessSandbox(Environment):
     """A chess server hosted in an isolated Modal sandbox.
 
@@ -91,11 +80,14 @@ class ChessSandbox(Environment):
         self._client: httpx.Client | None = None
 
         super().__init__(
-            image=_with_assignment_files(build_testbed_image(self.task, strict=strict)),
+            image=build_testbed_image(
+                self.task, strict=strict, assignment_files=SANDBOX_FILES
+            ),
             startup_timeout=startup_timeout,
             runtime_timeout=runtime_timeout,
             deployment_timeout=deployment_timeout,
             modal_sandbox_kwargs={"encrypted_ports": [port]},
+            ports=[port],
         )
 
         try:

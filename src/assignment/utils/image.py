@@ -14,14 +14,20 @@ already-fixed working tree would make a broken agent look like it passed.
 from __future__ import annotations
 
 import logging
+import shlex
+import shutil
 import subprocess
+import tempfile
 from pathlib import Path
 
 import modal
 
+from assignment.local_sandbox import docker_build, sandbox_backend
 from assignment.task import Task
 
 logger = logging.getLogger(__name__)
+
+ASSIGNMENT_DIR = "/opt/assignment"
 
 # Local caches, credentials, and git metadata never belong in the testbed. The
 # .git directory in particular is a gitlink file in a submodule checkout and
@@ -84,21 +90,34 @@ def verify_source(task: Task, strict: bool = True) -> None:
             "which silently invalidates the evaluation if one of them is the fix."
         )
 
-def build_testbed_image(task: Task, strict: bool = True, force_build: bool = False) -> modal.Image:
+def build_testbed_image(
+    task: Task,
+    strict: bool = True,
+    force_build: bool = False,
+    assignment_files: tuple[Path, ...] = (),
+) -> "modal.Image | str":
     """Build the image holding the repository under test at its base commit.
 
     Args:
         task: The task whose Dockerfile and source checkout to build from.
         strict: Refuse to build when the checkout does not match the task's
             base commit. See `verify_source`.
-        force_build: Skip Modal's build cache.
+        force_build: Skip the builder's layer cache.
+        assignment_files: Files to place in `/opt/assignment` inside the image.
+            The chess sandbox needs these; a plain testbed does not.
 
     Returns:
-        A Modal image with the repository installed at /testbed.
+        A Modal image, or a Docker tag when `SANDBOX_BACKEND=docker` is set.
+        Either one is accepted by `assignment.env.Environment`.
     """
     verify_source(task, strict=strict)
 
     logger.info("Building %s from %s at %s", task.id, task.source, task.base_commit[:12])
+    if sandbox_backend() == "docker":
+        return build_testbed_docker_image(
+            task, assignment_files=assignment_files, force_build=force_build
+        )
+
     image = modal.Image.from_dockerfile(
         str(task.dockerfile),
         context_dir=str(task.source),
@@ -115,4 +134,104 @@ def build_testbed_image(task: Task, strict: bool = True, force_build: bool = Fal
         logger.info("Pinning %d packages on top of the built image", len(task.pins))
         image = image.pip_install(*task.pins)
 
+    for source in assignment_files:
+        image = image.add_local_file(
+            str(source),
+            f"{ASSIGNMENT_DIR}/{Path(source).name}",
+            copy=True,  # SWE-ReX adds its runtime build layer afterwards.
+        )
+
     return image
+
+
+def _copy_source(source: Path, destination: Path) -> None:
+    """Copy a checkout into a build context, minus caches and git metadata."""
+
+    def ignore(directory: str, names: list[str]) -> set[str]:
+        return {
+            name
+            for name in names
+            if is_ignored(Path(directory) / name)
+        }
+
+    shutil.copytree(source, destination, ignore=ignore, symlinks=True)
+
+
+def build_testbed_docker_image(
+    task: Task,
+    assignment_files: tuple[Path, ...] = (),
+    force_build: bool = False,
+) -> str:
+    """Build the testbed with the local Docker daemon and return its tag.
+
+    Two builds, because the task's Dockerfile cannot be amended: the second one
+    starts `FROM` the first and adds what has to come afterwards. The build
+    context is a temporary copy of the checkout rather than the checkout
+    itself, so a `.dockerignore` never has to be written into a submodule this
+    assignment forbids touching.
+
+    Args:
+        task: The task whose Dockerfile and source checkout to build from.
+        assignment_files: Files to place in `/opt/assignment` inside the image.
+        force_build: Skip the layer cache.
+
+    Returns:
+        The tag of the finished image.
+    """
+    digest = task.base_commit[:12]
+    final_tag = f"assignment-{task.id}:{digest}"
+    if assignment_files:
+        # Otherwise two callers sharing a tag would silently get whichever
+        # image was built first.
+        final_tag += "-chess"
+
+    # Nothing to add on top, so the task's Dockerfile is the whole story and
+    # the build can be tagged as final directly.
+    if not task.pins and not assignment_files:
+        with tempfile.TemporaryDirectory(prefix="assignment-build-") as context_dir:
+            context = Path(context_dir)
+            _copy_source(task.source, context / "checkout")
+            # The Dockerfile sits beside the context, not in it, so its own
+            # `COPY . /testbed` cannot pull a stray file into the image.
+            docker_build(
+                context / "checkout",
+                final_tag,
+                dockerfile=task.dockerfile,
+                force=force_build,
+            )
+        return final_tag
+
+    base_tag = f"{final_tag}-base"
+    with tempfile.TemporaryDirectory(prefix="assignment-build-") as context_dir:
+        context = Path(context_dir)
+        _copy_source(task.source, context / "checkout")
+        docker_build(
+            context / "checkout",
+            base_tag,
+            dockerfile=task.dockerfile,
+            force=force_build,
+        )
+
+    additions = [f"FROM {base_tag}"]
+    if task.pins:
+        logger.info("Pinning %d packages on top of the built image", len(task.pins))
+        additions.append(
+            "RUN pip install --no-cache-dir "
+            + " ".join(shlex.quote(pin) for pin in task.pins)
+        )
+    if assignment_files:
+        additions += [
+            f"RUN mkdir -p {ASSIGNMENT_DIR}",
+            f"COPY files/ {ASSIGNMENT_DIR}/",
+        ]
+
+    with tempfile.TemporaryDirectory(prefix="assignment-layer-") as layer_dir:
+        layer = Path(layer_dir)
+        (layer / "Dockerfile").write_text("\n".join(additions) + "\n")
+        if assignment_files:
+            (layer / "files").mkdir()
+            for source in assignment_files:
+                shutil.copy(source, layer / "files" / Path(source).name)
+        docker_build(layer, final_tag, force=force_build)
+
+    return final_tag

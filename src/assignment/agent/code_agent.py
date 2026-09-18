@@ -46,11 +46,39 @@ class CodeAgent(Agent):
         # TODO(Part 1.3): Make the `execute` and `send_message` tools available
         # to the agent.
 
-        # TODO(1.1.b): Construct the system prompt and task_prompt. These
-        # should be usable by the `Agent.build_prompt` method.
         # TODO(1.4): If any skills are available to the agent, make their
         # descriptions/metadata available to the agent in the prompt.
 
+        system_information = json.dumps(
+            {
+                "machine": self.env.machine,
+                "release": self.env.release,
+                "system": self.env.system,
+                "version": self.env.version,
+            },
+            indent=2,
+        )
+        self.system_prompt = (
+            "You are a software engineering agent working in a Linux container, "
+            "on a repository checked out at /testbed.\n"
+            "\n"
+            "You are given a bug report. Reproduce the failure, find its cause, "
+            "fix it in the repository, and verify the fix by running the "
+            "relevant tests.\n"
+            "\n"
+            "Every command runs in a fresh shell, so a `cd` or an export does "
+            "not carry over to the next call. Prefer narrow commands (`sed -n`, "
+            "`grep -n`, `tail`) over printing whole files.\n"
+            "\n"
+            "<system_information>\n"
+            f"{system_information}\n"
+            "</system_information>\n"
+        )
+        self.task_prompt = (
+            "Fix the following issue in the repository at /testbed.\n\n" + self.task
+        )
+
+    # make the execute and send_message tools available to the agent
     def execute_tool_calls(
         self, tool_calls: list[dict[str, Any]]
     ) -> list[dict[str, str]]:

@@ -2,12 +2,14 @@ import asyncio
 import posixpath
 import time
 from pathlib import PurePath
-from typing import Any
+from typing import Any, Sequence
 
 import modal
 from swerex.deployment.modal import ModalDeployment
 from swerex.runtime.abstract import Command
 from swerex.runtime.remote import RemoteRuntime
+
+from assignment.local_sandbox import DockerSandbox, published_ports, sandbox_backend
 
 
 def _tls_port_configuration(
@@ -97,6 +99,10 @@ class AssignmentModalDeployment(ModalDeployment):
 class Environment:
     """
     Executes bash commands in a Modal sandbox via SWE-ReX.
+
+    With ``SANDBOX_BACKEND=docker``, the sandbox is a local container driven by
+    ``docker exec`` instead. The public surface is identical either way, so
+    callers do not branch on which backend is active.
     """
 
     # NOTE(source): https://github.com/SWE-agent/mini-swe-agent/blob/main/src/minisweagent/environments/extra/swerex_modal.py
@@ -111,6 +117,7 @@ class Environment:
         install_pipx: bool = True,
         modal_sandbox_kwargs: dict[str, Any] | None = None,
         conda_env: str | None = None,
+        ports: Sequence[int] | None = None,
     ):
         """Launch a Modal sandbox and block until its runtime answers.
 
@@ -134,24 +141,42 @@ class Environment:
                 an environment named ``testbed`` but never activate it, so
                 without this ``python`` is conda's base environment, where the
                 repository and its dependencies are not installed.
+            ports: Ports to publish on the host. Only the Docker backend uses
+                this; Modal forwards the ports named in ``modal_sandbox_kwargs``
+                instead, so a caller that sets both works under either backend.
         """
         self.cwd = cwd
         # Merged into every command's environment; a per-call `env` wins.
         self.env_defaults: dict[str, str] = {}
-        self.deployment = AssignmentModalDeployment(
-            image=image,
-            startup_timeout=startup_timeout,
-            runtime_timeout=runtime_timeout,
-            deployment_timeout=deployment_timeout,
-            install_pipx=install_pipx,
-            modal_sandbox_kwargs=modal_sandbox_kwargs,
-        )
+        self.backend = sandbox_backend()
+        self.deployment = None
+        self._docker: DockerSandbox | None = None
 
-        async def _start():
-            await self.deployment.start()
-            await self.deployment.is_alive()
+        if self.backend == "docker":
+            self._docker = DockerSandbox(
+                image=str(image),
+                cwd=cwd,
+                ports=ports if ports is not None else published_ports(modal_sandbox_kwargs),
+                deployment_timeout=deployment_timeout,
+                # Shared by reference so `activate_conda_env` below is seen by
+                # every later command.
+                env_defaults=self.env_defaults,
+            )
+        else:
+            self.deployment = AssignmentModalDeployment(
+                image=image,
+                startup_timeout=startup_timeout,
+                runtime_timeout=runtime_timeout,
+                deployment_timeout=deployment_timeout,
+                install_pipx=install_pipx,
+                modal_sandbox_kwargs=modal_sandbox_kwargs,
+            )
 
-        asyncio.run(_start())
+            async def _start():
+                await self.deployment.start()
+                await self.deployment.is_alive()
+
+            asyncio.run(_start())
 
         if conda_env:
             self.activate_conda_env(conda_env)
@@ -169,6 +194,9 @@ class Environment:
         deployment keeps its handle afterwards, so this asks the sandbox itself
         rather than trusting the handle's existence.
         """
+        if self._docker is not None:
+            return self._docker.is_alive()
+
         sandbox = self.deployment._sandbox
         return sandbox is not None and sandbox.poll() is None
 
@@ -236,6 +264,16 @@ class Environment:
         # Command.shell is a strict bool, so None would fail validation.
         shell = True if shell is None else shell
 
+        if self._docker is not None:
+            return self._docker.execute(
+                command,
+                timeout=timeout,
+                cwd=cwd,
+                env=env,
+                shell=shell,
+                check=check,
+            )
+
         arguments = {
             "command": command,
             "timeout": timeout,
@@ -292,6 +330,9 @@ class Environment:
             timeout: Seconds allowed for each of the shutdown and the
                 termination steps.
         """
+        if self._docker is not None:
+            self._docker.stop(timeout=timeout)
+            return
 
         async def _stop():
             # ModalDeployment.stop() has an inverted poll() check and only
@@ -309,6 +350,9 @@ class Environment:
 
     def tunnel_url(self, port: int) -> str:
         """Return the public URL for a port forwarded when the sandbox started."""
+
+        if self._docker is not None:
+            return self._docker.tunnel_url(port)
 
         async def _tunnel_url() -> str:
             tunnels = await self.deployment.sandbox.tunnels.aio()

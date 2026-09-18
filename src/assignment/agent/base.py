@@ -150,8 +150,12 @@ class Agent:
         if self.skills:
             self.tools.append(INVOKE_SKILL_TOOL)
 
-        # TODO(1.1.a): Add machinery to maintain agent state as it takes actions
-        # and observes the results.
+        # Every assistant action and the tool observations answering it, in
+        # the order the model will see them. The system and task messages are
+        # deliberately NOT stored here: `build_prompt` assembles those from
+        # `system_prompt` / `task_prompt` on every call, so a subclass stays
+        # in control of its own opening messages.
+        self.history: list[dict[str, Any]] = []
 
     def load_skills(self, skills_path: Path) -> dict[str, dict[str, str]]:
         """Load the skill folders exposed to this agent."""
@@ -218,16 +222,26 @@ class Agent:
         return response.choices[0].message.model_dump(exclude_none=True)
 
     def build_prompt(self) -> list[dict[str, Any]]:
-        # TODO(1.1.a): Construct a sequence of messages that form the language
-        # model prompt. This should include standing instructions, task
-        # specification, prior interaction including observations, reasoning,
-        # and actions from previous turns. Note that this method should be
-        # domain-agnostic and construct the prompt in a way that would apply
-        # to any of the inheriting domain-specific agents.
+        """Assemble the message sequence sent to the language model.
 
-        # You want to be careful about which attributes of the class you modify
-        # here as they may also be handled by the subclasses.
-        raise NotImplementedError
+        The opening messages come from the subclass, so this method never has
+        to know which domain it is serving. Everything after them is the
+        accumulated history, appended by the loop as the run proceeds.
+
+        This is a pure read: it is called several times per step (by
+        `query_language_model`, `estimate_active_prompt_tokens`, and twice by
+        `maybe_compact_context`), so it must never modify agent state.
+
+        Returns:
+            The standing instructions, the task statement, then every action
+            and observation so far, in the order the API expects.
+        """
+        messages: list[dict[str, Any]] = [
+            {"role": "system", "content": self.system_prompt},
+            {"role": "user", "content": self.task_prompt},
+        ]
+        messages.extend(self.history)
+        return messages
 
     def estimate_active_prompt_tokens(self) -> int:
         """Estimate the next prompt, calibrated by the provider's latest usage."""
@@ -331,12 +345,36 @@ class Agent:
             # by setting `Agent.finished`. If the agent exceeds the
             # `step_limit`, raise `StepLimitError`.
 
+            # React 主循环
+            while not self.finished:
+                # 先压缩上下文
+                self.maybe_compact_context()
+                # 先检查步数 超过步数 StepLimitError
+                if self.steps_taken >= self.step_limit:
+                    raise StepLimitError(f"Reached step limit {self.step_limit}")
+
+                # 1. Prompting LLM 
+                assistant_msg =  self.query_language_model()
+
+                # 追加进入history
+                self.history.append(assistant_msg)
+
+                # extracting tool_calls from model response 
+                tool_calls = assistant_msg.get("tool_calls", [])
+
+                if not tool_calls:
+                    #"response contained no parsed tool call; the loop should preserve the response and continue"
+                    continue 
+
+                # executing tool calls 
+                observations = self.execute_tool_calls(tool_calls)
+                # 把observation 写入history 多个观察用extend
+                self.history.extend(observations)
+
             # TODO(2.2) Call `maybe_compact_context()` before each new action
             # request in your shared loop. It already estimates active tokens
             # and handles the threshold, and tracks compaction events for
             # logging.
-
-            raise NotImplementedError
         finally:
             # This block is provided infrastructure. Do not modify it: a
             # trajectory is required even when a run fails.

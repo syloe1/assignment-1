@@ -10,3 +10,7 @@ data/*
 !data/README.md
 !data/.gitkeep
 .env
+
+summary.md
+.sandbox/
+sandbox/
