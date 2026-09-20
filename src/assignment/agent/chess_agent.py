@@ -173,7 +173,42 @@ class ChessAgent(Agent):
         # 4. Link every observation to its call with tool_call_id.
         # 5. Turn malformed, unknown, rejected, or extra parallel calls into
         #    recoverable <chess_error> observations instead of crashing.
-
+        
+        observations: list[dict[str, str]] = []
+        played = False
+        for call in tool_calls:
+            call_id = call.get("id", "unknown_id")
+            func_info = call.get("function", {})
+            func_name = func_info.get("name")
+            raw_args = func_info.get("arguments")
+            if func_name == PLAY_MOVE_TOOL["function"]["name"]:
+                if played:
+                    # 本轮已经尝试走棋，多余并行调用本地拒绝
+                    content = (
+                        "<chess_error>The board already changed this turn; "
+                        "play one move at a time.</chess_error>"
+                    )
+                else:
+                    played = True
+                    # 原始参数直接传给 _play_move，不提前解析
+                    result = _play_move(self.chess_client, raw_args)
+                    # 前缀判断是否为错误
+                    if result.lstrip().startswith("<chess_error>"):
+                        content = result
+                    else:
+                        state = json.loads(result)
+                        self.last_state = state
+                        self.finished = bool(state.get("game_over"))
+                        content = self.format_state(state)
+            else:
+                # 未注册的工具，返回可恢复错误
+                content = f"<chess_error>Unknown tool `{func_name}`.</chess_error>"
+            observations.append({
+                "role": "tool",
+                "tool_call_id": call_id,
+                "content": content,
+            })
         # TODO(Part 3.3-4): add cases for simulate_move and run_python, with
         # linked observations and recoverable errors, just like the old tool.
-        raise NotImplementedError
+        return observations
+                    

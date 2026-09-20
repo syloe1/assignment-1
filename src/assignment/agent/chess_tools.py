@@ -67,7 +67,38 @@ def _play_move(client: httpx.Client, arguments: str) -> str:
     # for the agent to address. Cover malformed JSON arguments, arguments
     # that are not an object, a missing or non-string fen, a non-string move,
     # a position or move the server rejects, and a transport failure.
-    raise NotImplementedError
+    try:
+        # 新增：arguments类型校验，拦截 None / dict / int 等非字符串，避免json.loads抛TypeError
+        if not isinstance(arguments, str):
+            return "<chess_error>Tool arguments must be a JSON string.</chess_error>"
+
+        # 解析原始JSON字符串
+        args = json.loads(arguments)
+        # 校验必须是JSON对象dict
+        if not isinstance(args, dict):
+            raise ValueError("Arguments must be a JSON object.")
+        # 校验move字段存在
+        if "move" not in args:
+            raise ValueError("Missing required argument: move")
+        move_val = args["move"]
+        # 校验move是非空UCI字符串
+        if not isinstance(move_val, str) or not move_val.strip():
+            raise ValueError("move must be a non-empty UCI string.")
+
+        # POST 请求到 /api/move
+        state_dict = _request_state(client, "POST", "/api/move", json={"move": move_val})
+        # 成功：序列化state字典为json字符串返回
+        return json.dumps(state_dict)
+
+    # 顺序不能变！JSONDecodeError是ValueError子类，放前面
+    except json.JSONDecodeError as e:
+        return f"<chess_error>Malformed JSON arguments: {e}</chess_error>"
+    except httpx.TransportError as e:
+        return f"<chess_error>Transport failure: {e}</chess_error>"
+    except ValueError as e:
+        return f"<chess_error>Bad arguments or server rejected move: {e}</chess_error>"
+    except RuntimeError as e:
+        return f"<chess_error>Invalid server response: {e}</chess_error>"
 
 
 def _run_python(env: Any, port: int, arguments: str) -> str:
