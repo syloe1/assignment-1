@@ -31,7 +31,24 @@ MAX_OBSERVATION_CHARS = 10_000
 # TODO(Part 2): Write instructions that make the model produce concise working
 # memory for a software agent. The prompt should preserve concrete progress,
 # failures, test results, constraints, and next steps without copying raw output.
-COMPACTION_SYSTEM_PROMPT = ""
+COMPACTION_SYSTEM_PROMPT = """You compress one software agent's ReAct history \
+into a short factual working memory.
+
+Write plain prose. No markdown, no headings, no preamble.
+
+Keep, when the history supports it:
+- the objective and any constraints stated for it
+- files read or changed, and the edits made to them
+- commands run and their concrete results: exit codes, test outcomes, error text
+- approaches that failed, and why they failed
+- what is blocked, and the next action to take
+
+Drop:
+- output that was superseded or repeated, such as the same file read twice
+- raw file dumps, long logs, and detail no later step relied on
+
+Record only what the history states. Do not invent results, and do not add
+instructions, advice, or next steps of your own."""
 
 
 class StepLimitError(Exception):
@@ -96,6 +113,26 @@ def parse_yaml_frontmatter(text: str, source: str | Path) -> dict[str, Any]:
     if not isinstance(parsed, dict):
         raise ValueError(f"{source} frontmatter is not a YAML mapping")
     return parsed
+
+
+def group_history_into_steps(
+    history: list[dict[str, Any]],
+) -> list[list[dict[str, Any]]]:
+    """Group history into assistant actions, each with the observations answering it.
+
+    A step starts at an assistant message and runs up to the next one, so an
+    action that made several parallel calls stays whole. Compaction has to cut
+    between steps and never inside one: a tool observation separated from the
+    call it answers is a message sequence the API rejects.
+    """
+
+    steps: list[list[dict[str, Any]]] = []
+    for message in history:
+        if message.get("role") == "assistant" or not steps:
+            steps.append([message])
+        else:
+            steps[-1].append(message)
+    return steps
 
 
 class Agent:
@@ -221,7 +258,9 @@ class Agent:
             if not isinstance(name, str) or not name:
                 raise ValueError(f"{skill_file} has no `name` in its frontmatter")
             if not isinstance(description, str) or not description:
-                raise ValueError(f"{skill_file} has no `description` in its frontmatter")
+                raise ValueError(
+                    f"{skill_file} has no `description` in its frontmatter"
+                )
             if name in skills:
                 raise ValueError(f"Duplicate skill name `{name}` in {skill_file}")
 
@@ -332,6 +371,14 @@ class Agent:
     def compact_context(self):
         """Replace parts of prompt with model-generated working memory. Changes the
         content that `build_prompt` emits."""
+        # The opening system/task messages are not in `history`, so summarizing
+        # a prefix of it keeps them verbatim for free.
+        steps = group_history_into_steps(self.history)
+        keep_recent = self.compaction_keep_recent_steps
+        if len(steps) <= keep_recent:
+            return [], {}
+        old_steps = steps[:-keep_recent]
+        kept_steps = steps[-keep_recent:]
 
         # TODO(2.1): Prompt the model to compact the context. The system
         # prompt should ask for concise factual working memory and preserve
@@ -341,10 +388,17 @@ class Agent:
         # messages verbatim and at least the latest complete assistant action
         # with all linked tool observations. The resulting summary should change
         # what `build_prompt` emits, and reduce the length of the prompt.
-
-        raise NotImplementedError
-
-        compaction_prompt = []
+        compaction_prompt = [
+            {"role": "system", "content": COMPACTION_SYSTEM_PROMPT},
+            {
+                "role": "user",
+                "content": (
+                    f"{self.task_prompt}\n\n"
+                    "Work performed so far, to compress:\n"
+                    f"{json.dumps(old_steps, ensure_ascii=False, indent=2)}"
+                ),
+            },
+        ]
 
         ### Do not modify this section ###
         compaction_response = self.client.chat.completions.create(
@@ -357,6 +411,17 @@ class Agent:
 
         # Use `compaction_response` to update what `build_prompt` emits, but
         # DO NOT modify the object itself. Let the method return it unchanged.
+        summary = compaction_response.choices[0].message.content or ""
+        self.history = [
+            # A `user` message, because the step after it opens with an assistant
+            # message: two assistant messages in a row is not a sequence the API
+            # accepts, and this is information handed to the model, not a tool
+            # observation. The tag keeps it from reading as a new instruction.
+            {
+                "role": "user",
+                "content": f"<working_memory>\n{summary}\n</working_memory>",
+            }
+        ] + [message for step in kept_steps for message in step]
 
         ### Do not modify this section ###
         return compaction_prompt, compaction_response.model_dump(mode="json")
@@ -410,13 +475,16 @@ class Agent:
 
             # React 主循环
             while not self.finished:
-                # 先压缩上下文
-                self.maybe_compact_context()
-                # 先检查步数 超过步数 StepLimitError
+                # Budget first: there is no next action request to compact for
+                # once the limit is reached, and compacting anyway would spend a
+                # model call on a step that never runs.
                 if self.steps_taken >= self.step_limit:
                     raise StepLimitError(f"Reached step limit {self.step_limit}")
 
-                # 1. Prompting LLM 
+                # 压缩上下文
+                self.maybe_compact_context()
+
+                # 1. Prompting LLM
                 assistant_msg =  self.query_language_model()
 
                 # 追加进入history
@@ -434,10 +502,6 @@ class Agent:
                 # 把observation 写入history 多个观察用extend
                 self.history.extend(observations)
 
-            # TODO(2.2) Call `maybe_compact_context()` before each new action
-            # request in your shared loop. It already estimates active tokens
-            # and handles the threshold, and tracks compaction events for
-            # logging.
         finally:
             # This block is provided infrastructure. Do not modify it: a
             # trajectory is required even when a run fails.
