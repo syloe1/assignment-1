@@ -11,7 +11,7 @@ import base64
 import json
 import time
 from pathlib import Path
-from urllib.error import HTTPError, URLError
+from urllib.error import HTTPError
 from urllib.request import urlopen
 
 import httpx
@@ -137,7 +137,12 @@ class ChessSandbox(Environment):
                 if response.status == 200 and payload == {"status": "ok"}:
                     return
                 last_error = f"unexpected health response: {payload!r}"
-            except (HTTPError, URLError, TimeoutError, json.JSONDecodeError) as exc:
+            # OSError covers the whole not-ready-yet family: URLError and
+            # TimeoutError, and ConnectionResetError too. Under the Docker
+            # backend the published port is proxied, so connecting before the
+            # server binds is reset rather than refused, and that is the normal
+            # state of the first poll — it must be retried, not raised.
+            except (HTTPError, OSError, json.JSONDecodeError) as exc:
                 last_error = str(exc)
             time.sleep(0.25)
 
