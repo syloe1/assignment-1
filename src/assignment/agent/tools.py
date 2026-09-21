@@ -155,7 +155,41 @@ PLAY_MOVE_TOOL = {
 
 
 # TODO(3.3): Define the `simulate_move` tool, like the `play_move` tool.
-SIMULATE_MOVE_TOOL: dict = {}
+# TODO(3.3.a): Define an OpenAI function-tool schema named ``simulate_move``.
+# Accepts required fen (full six-field FEN), optional move (UCI string).
+# If move omitted: returns position + all legal moves.
+# If fen + move provided: simulate exactly one ply, return resulting board state.
+# This tool does NOT modify the live game state, only simulates.
+SIMULATE_MOVE_TOOL = {
+    "type": "function",
+    "function": {
+        "name": "simulate_move",
+        "description": (
+            "Simulate a chess board position or preview a chess move using UCI notation. "
+            "When only a full six-field FEN is supplied: returns the board position and all legal moves for that position. "
+            "When both FEN and UCI move are supplied: executes exactly one ply and returns the resulting board state. "
+            "This is a read-only simulation tool and will not alter the active game. "
+            "Examples: fen='rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1', move='e2e4'"
+        ),
+        "strict": True,
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "fen": {
+                    "type": "string",
+                    "description": "Complete six-field FEN string representing a chess board position.",
+                },
+                "move": {
+                    "type": "string",
+                    "description": "Optional UCI notation move string, e.g. e2e4, e7e8q. Omit this argument to inspect the position and its legal moves.",
+                },
+            },
+            "required": ["fen"],
+            "additionalProperties": False,
+        },
+    },
+}
+
 
 # TODO()
 RUN_PYTHON_TOOL: dict = {}
