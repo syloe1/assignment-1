@@ -52,7 +52,39 @@ def _simulate_move(client: httpx.Client, arguments: str) -> str:
     # JSON arguments, arguments that are not an object, a missing or
     # non-string fen, a non-string move, a position or move the server rejects,
     # and a transport failure.
-    raise NotImplementedError
+    try:
+        if not isinstance(arguments, str):
+            return "<chess_error>arguments must be a JSON string</chess_error>"
+
+        parsed = json.loads(arguments)
+        if not isinstance(parsed, dict):
+            raise ValueError("arguments must be a JSON object")
+
+        fen = parsed.get("fen")
+        if not isinstance(fen, str) or not fen.strip():
+            raise ValueError("fen must be a non-empty six-field FEN string")
+
+        move = parsed.get("move")
+        # Allow move=None (from sandbox move:null), reject non-string non-None values
+        if move is not None:
+            if not isinstance(move, str) or not move.strip():
+                raise ValueError("move must be a UCI notation string or omitted")
+
+        payload = {"fen": fen}
+        if move is not None:
+            payload["move"] = move
+
+        state = _request_state(client, "POST", "/api/simulate", json=payload)
+        return json.dumps(state)
+
+    except json.JSONDecodeError as e:
+        return f"<chess_error>invalid JSON arguments: {e}</chess_error>"
+    except httpx.TransportError as e:
+        return f"<chess_error>transport failure contacting chess server: {e}</chess_error>"
+    except ValueError as e:
+        return f"<chess_error>invalid simulate_move arguments: {e}</chess_error>"
+    except RuntimeError as e:
+        return f"<chess_error>simulate_move server error: {e}</chess_error>"
 
 
 def _play_move(client: httpx.Client, arguments: str) -> str:

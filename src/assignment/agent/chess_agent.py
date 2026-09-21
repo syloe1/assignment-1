@@ -201,6 +201,11 @@ class ChessAgent(Agent):
                         self.last_state = state
                         self.finished = bool(state.get("game_over"))
                         content = self.format_state(state)
+            elif func_name == SIMULATE_MOVE_TOOL["function"]["name"]:
+                # Raw passthrough: a simulation is data for reasoning, not a
+                # view of the live game, so it is not run through format_state.
+                content = _simulate_move(self.chess_client, raw_args)
+
             else:
                 # 未注册的工具，返回可恢复错误
                 content = f"<chess_error>Unknown tool `{func_name}`.</chess_error>"
