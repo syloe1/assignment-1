@@ -192,4 +192,28 @@ SIMULATE_MOVE_TOOL = {
 
 
 # TODO()
-RUN_PYTHON_TOOL: dict = {}
+# TODO(3.4): Define OpenAI function-tool schema for run_python
+RUN_PYTHON_TOOL = {
+    "type": "function",
+    "function": {
+        "name": "run_python",
+        "description": (
+            "Execute a snippet of Python code inside a sandbox. "
+            "The sandbox has access to simulate_move and play_move functions. "
+            "Use this to search, look ahead, and select chess moves programmatically."
+        ),
+        "strict": True,
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "code": {
+                    "type": "string",
+                    "description": "Python source code string to execute inside sandbox."
+                }
+            },
+            "required": ["code"],
+            "additionalProperties": False
+        }
+    }
+}
+

@@ -205,7 +205,16 @@ class ChessAgent(Agent):
                 # Raw passthrough: a simulation is data for reasoning, not a
                 # view of the live game, so it is not run through format_state.
                 content = _simulate_move(self.chess_client, raw_args)
-
+            elif func_name == RUN_PYTHON_TOOL["function"]["name"]:
+                content = _run_python(self.env, self.python_sandbox_port, raw_args)
+                # snippet may call play_move and mutate live board, mark this turn as consumed
+                played = True
+                # re-read live board state, reset=False to not restart game
+                state = _game_state(self.chess_client, reset=False)
+                self.last_state = state
+                self.finished = bool(state.get("game_over"))
+                # append formatted board state for model observation
+                content += "\n" + self.format_state(state)
             else:
                 # 未注册的工具，返回可恢复错误
                 content = f"<chess_error>Unknown tool `{func_name}`.</chess_error>"

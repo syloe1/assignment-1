@@ -158,7 +158,36 @@ def _run_python(env: Any, port: int, arguments: str) -> str:
     #
     # Return <chess_error>{message}</chess_error> if there are issues like type
     # mismatches or parsing failures.
-    raise NotImplementedError
+    try:
+        if not isinstance(arguments, str):
+            return "<chess_error>arguments must be a JSON string</chess_error>"
+        parsed = json.loads(arguments)
+        if not isinstance(parsed, dict):
+            raise ValueError("arguments must be a JSON object")
+        code = parsed.get("code")
+        if not isinstance(code, str) or not code.strip():
+            raise ValueError("code must be a non-empty string")
+
+        # base64 encode code to avoid shell quoting problem
+        encoded_code = base64.b64encode(code.encode("utf-8")).decode("ascii")
+
+        # invoke sandbox runner, argv list + shell=False
+        result = env.execute(
+            ["python", "/opt/assignment/sandbox_python.py", str(port), encoded_code],
+            shell=False,
+        )
+        # non-zero returncode: sandbox runner itself failed
+        if result["returncode"] != 0:
+            msg = result["exception_info"] or result["stderr"]
+            return f"<chess_error>{msg}</chess_error>"
+
+        # return raw stdout (sandbox's json output)
+        return result["stdout"]
+
+    except json.JSONDecodeError as e:
+        return f"<chess_error>invalid JSON arguments: {e}</chess_error>"
+    except ValueError as e:
+        return f"<chess_error>invalid run_python arguments: {e}</chess_error>"
 
 
 def _invoke_skill(skills: dict[str, dict[str, str]], arguments: str) -> str:
