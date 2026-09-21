@@ -195,7 +195,24 @@ def _invoke_skill(skills: dict[str, dict[str, str]], arguments: str) -> str:
     # TODO(3.5): parse the arguments and return the named skill's content.
     # Return <chess_error>{message}</chess_error> if there are issues like type
     # mismatches or parsing failures.
-    raise NotImplementedError
+    try:
+        if not isinstance(arguments, str):
+            return "<chess_error>arguments must be a JSON string</chess_error>"
+        parsed = json.loads(arguments)
+        if not isinstance(parsed, dict):
+            raise ValueError("arguments must be a JSON object")
+        name = parsed.get("name")
+        if not isinstance(name, str) or not name.strip():
+            raise ValueError("name must be a non-empty skill name")
+        skill = skills.get(name)
+        if skill is None:
+            available = ", ".join(sorted(skills)) or "none"
+            raise ValueError(f"no skill named `{name}`; available: {available}")
+        return skill["content"]  # the whole file, frontmatter included
+    except json.JSONDecodeError as e:
+        return f"<chess_error>invalid JSON arguments: {e}</chess_error>"
+    except ValueError as e:
+        return f"<chess_error>{e}</chess_error>"
 
 
 def _game_state(client: httpx.Client, reset: bool = False) -> dict:

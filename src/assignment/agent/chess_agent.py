@@ -215,6 +215,8 @@ class ChessAgent(Agent):
                 self.finished = bool(state.get("game_over"))
                 # append formatted board state for model observation
                 content += "\n" + self.format_state(state)
+            elif func_name == INVOKE_SKILL_TOOL["function"]["name"]:
+                content = _invoke_skill(self.skills, raw_args)
             else:
                 # 未注册的工具，返回可恢复错误
                 content = f"<chess_error>Unknown tool `{func_name}`.</chess_error>"
